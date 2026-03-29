@@ -46,15 +46,20 @@ def load_config():
 
 
 class StreamingPlayer:
-    """Plays audio chunks as they arrive, with interruption support."""
+    """Plays audio chunks as they arrive, with pause/resume and interruption."""
 
     def __init__(self):
         self._queue = queue.Queue()
         self._stream = None
         self._finished = False  # True when all chunks have been queued
         self._cancel = False
+        self._paused = False
 
     def _callback(self, outdata, frames, time_info, status):
+        if self._paused:
+            outdata.fill(0)
+            return  # Keep stream alive but output silence
+
         try:
             data = self._queue.get_nowait()
         except queue.Empty:
@@ -77,6 +82,7 @@ class StreamingPlayer:
         self._queue = queue.Queue()
         self._finished = False
         self._cancel = False
+        self._paused = False
         try:
             self._stream = sd.OutputStream(
                 samplerate=SAMPLE_RATE,
@@ -104,10 +110,19 @@ class StreamingPlayer:
         """Signal that no more chunks will arrive."""
         self._finished = True
 
+    def pause(self):
+        """Pause playback. Audio queue is preserved."""
+        self._paused = True
+
+    def resume(self):
+        """Resume playback from where it was paused."""
+        self._paused = False
+
     def stop(self):
-        """Stop playback immediately."""
+        """Stop playback immediately and discard all queued audio."""
         self._cancel = True
         self._finished = True
+        self._paused = False
         # Drain queue
         while not self._queue.empty():
             try:
@@ -124,7 +139,11 @@ class StreamingPlayer:
 
     @property
     def is_playing(self):
-        return self._stream is not None and self._stream.active
+        return self._stream is not None and self._stream.active and not self._paused
+
+    @property
+    def is_paused(self):
+        return self._paused and self._stream is not None and self._stream.active
 
 
 class KokoroDaemon:
@@ -134,6 +153,8 @@ class KokoroDaemon:
         self.player = StreamingPlayer()
         self._speak_task = None
         self._cancel_requested = threading.Event()
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()  # starts unpaused
 
         model_path = os.path.join(BASE_DIR, "models", self.config["model"])
         voices_path = os.path.join(BASE_DIR, "models", "voices-v1.0.bin")
@@ -158,6 +179,7 @@ class KokoroDaemon:
 
         self._speak_task = asyncio.current_task()
         self._cancel_requested.clear()
+        self._pause_event.set()  # ensure unpaused for new speech
         voice = self.config["voice"]
         speed = self.config["speed"]
         lang = self.config["lang"]
@@ -182,6 +204,8 @@ class KokoroDaemon:
                     log.info("Synthesis stopped by cancel flag after %d chunks", chunk_count)
                     self.player.stop()
                     return
+                # Wait here if paused — blocks synthesis, saves CPU
+                await self._pause_event.wait()
                 chunk_count += 1
                 self.player.feed_chunk(samples)
                 if chunk_count == 1:
@@ -202,8 +226,23 @@ class KokoroDaemon:
         self.player.finish()
         log.info("Synthesized %d chunks in %.2fs", chunk_count, time.time() - t0)
 
+    def handle_pause(self):
+        """Toggle pause/resume."""
+        if self.player.is_paused:
+            self.player.resume()
+            self._pause_event.set()  # unblock synthesis
+            log.info("Resumed")
+            return False  # not paused
+        elif self.player.is_playing:
+            self.player.pause()
+            self._pause_event.clear()  # block synthesis
+            log.info("Paused")
+            return True  # paused
+        return False
+
     def handle_stop(self):
         self._cancel_requested.set()
+        self._pause_event.set()  # unblock synthesis so it can exit
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
         self.player.stop()
@@ -233,6 +272,13 @@ class KokoroDaemon:
                     await writer.drain()
                     writer.close()
 
+            elif cmd == "pause":
+                paused = self.handle_pause()
+                resp = {"status": "ok", "paused": paused}
+                writer.write(json.dumps(resp).encode() + b"\n")
+                await writer.drain()
+                writer.close()
+
             elif cmd == "stop":
                 self.handle_stop()
                 resp = {"status": "ok"}
@@ -244,6 +290,7 @@ class KokoroDaemon:
                 resp = {
                     "status": "ok",
                     "speaking": self.player.is_playing,
+                    "paused": self.player.is_paused,
                     "voice": self.config["voice"],
                     "speed": self.config["speed"],
                 }

@@ -108,7 +108,8 @@ The menu bar app needs Accessibility access to listen for keyboard shortcuts glo
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+Cmd+S` | Read selected text (copies selection, then speaks) |
-| `Ctrl+Cmd+X` | Stop reading (immediately halts playback and synthesis) |
+| `Ctrl+Cmd+P` | Pause / Resume (toggle — freezes both audio and synthesis) |
+| `Ctrl+Cmd+X` | Stop reading (immediately halts playback and frees CPU) |
 | `Ctrl+Cmd+R` | Read clipboard contents |
 
 ### Right-click menu
@@ -117,8 +118,9 @@ Select text in any app → right-click → **Services** → **Read Aloud**
 
 ### Menu bar
 
-Click the 🔇 / 🔊 icon in the menu bar to:
-- See current status (idle / speaking)
+Click the 🔇 / 🔊 / ⏸ icon in the menu bar to:
+- See current status (idle / speaking / paused)
+- Pause or resume playback
 - Stop reading
 - Read clipboard
 - Change voice (8 presets)
@@ -133,6 +135,9 @@ echo "Text to read aloud" | venv/bin/python3 client.py
 
 # Speak text from argument
 venv/bin/python3 client.py "Read this sentence"
+
+# Pause / resume
+venv/bin/python3 client.py --pause
 
 # Stop playback
 venv/bin/python3 client.py --stop

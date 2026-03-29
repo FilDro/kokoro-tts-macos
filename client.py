@@ -51,6 +51,9 @@ def main():
     if "--stop" in sys.argv:
         cmd = {"cmd": "stop"}
         text = None
+    elif "--pause" in sys.argv:
+        cmd = {"cmd": "pause"}
+        text = None
     elif "--status" in sys.argv:
         cmd = {"cmd": "status"}
         text = None

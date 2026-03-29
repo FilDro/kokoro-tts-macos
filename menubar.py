@@ -74,6 +74,7 @@ class KokoroMenuBar(rumps.App):
         self.cfg = load_config()
 
         self.status_item = rumps.MenuItem("Status: checking...")
+        self.pause_item = rumps.MenuItem("Pause  (⌃⌘P)", callback=self.on_pause)
         self.stop_item = rumps.MenuItem("Stop Reading  (⌃⌘X)", callback=self.on_stop)
         self.read_clipboard_item = rumps.MenuItem(
             "Read Clipboard  (⌃⌘R)", callback=self.on_read_clipboard
@@ -119,6 +120,7 @@ class KokoroMenuBar(rumps.App):
         self.menu = [
             self.status_item,
             None,
+            self.pause_item,
             self.stop_item,
             self.read_clipboard_item,
             None,
@@ -152,6 +154,10 @@ class KokoroMenuBar(rumps.App):
                 if keycode == 7:
                     log.info("Global hotkey: Ctrl+Cmd+X → Stop")
                     threading.Thread(target=self._do_stop, daemon=True).start()
+                # Ctrl+Cmd+P (keycode 35) → Pause/Resume
+                elif keycode == 35:
+                    log.info("Global hotkey: Ctrl+Cmd+P → Pause/Resume")
+                    threading.Thread(target=self._do_pause, daemon=True).start()
                 # Ctrl+Cmd+S (keycode 1) → Read Selection (copy + speak)
                 elif keycode == 1:
                     log.info("Global hotkey: Ctrl+Cmd+S → Read Selection")
@@ -162,10 +168,13 @@ class KokoroMenuBar(rumps.App):
                     threading.Thread(target=self._do_read_clipboard, daemon=True).start()
 
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
-        log.info("Global hotkeys registered: Ctrl+Cmd+S (read selection), Ctrl+Cmd+X (stop), Ctrl+Cmd+R (read clipboard)")
+        log.info("Global hotkeys registered: Ctrl+Cmd+S (read), Ctrl+Cmd+P (pause), Ctrl+Cmd+X (stop), Ctrl+Cmd+R (clipboard)")
 
     def _do_stop(self):
         send_command({"cmd": "stop"})
+
+    def _do_pause(self):
+        send_command({"cmd": "pause"})
 
     def _do_read_selection(self):
         """Copy current selection (simulate Cmd+C), then speak it."""
@@ -200,15 +209,31 @@ class KokoroMenuBar(rumps.App):
         resp = send_command({"cmd": "status"})
         if resp and resp.get("status") == "ok":
             speaking = resp.get("speaking", False)
+            paused = resp.get("paused", False)
             voice = resp.get("voice", "?")
-            self.title = ICON_SPEAKING if speaking else ICON_IDLE
-            state = "Speaking" if speaking else "Idle"
+            if paused:
+                self.title = "⏸"
+                state = "Paused"
+            elif speaking:
+                self.title = ICON_SPEAKING
+                state = "Speaking"
+            else:
+                self.title = ICON_IDLE
+                state = "Idle"
             self.status_item.title = f"Status: {state} | Voice: {voice}"
-            self.stop_item.set_callback(self.on_stop if speaking else None)
+            # Update pause item label
+            self.pause_item.title = "Resume  (⌃⌘P)" if paused else "Pause  (⌃⌘P)"
+            active = speaking or paused
+            self.pause_item.set_callback(self.on_pause if active else None)
+            self.stop_item.set_callback(self.on_stop if active else None)
         else:
             self.title = ICON_OFFLINE
             self.status_item.title = "Status: Daemon offline"
+            self.pause_item.set_callback(None)
             self.stop_item.set_callback(None)
+
+    def on_pause(self, _):
+        threading.Thread(target=self._do_pause, daemon=True).start()
 
     def on_stop(self, _):
         threading.Thread(target=self._do_stop, daemon=True).start()
