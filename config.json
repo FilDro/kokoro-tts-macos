@@ -1,0 +1,6 @@
+{
+  "voice": "af_heart",
+  "speed": 1.0,
+  "model": "kokoro-v1.0.onnx",
+  "lang": "en-us"
+}
