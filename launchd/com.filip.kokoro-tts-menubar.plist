@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.filip.kokoro-tts</string>
+	<string>com.filip.kokoro-tts-menubar</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/filip/.local/share/kokoro-tts/venv/bin/python3</string>
-		<string>/Users/filip/.local/share/kokoro-tts/daemon.py</string>
+		<string>/Users/filip/.local/share/kokoro-tts/menubar.py</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -17,16 +17,16 @@
 		<false/>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>/Users/filip/.local/share/kokoro-tts/launchd-stdout.log</string>
+	<string>/Users/filip/.local/share/kokoro-tts/menubar-stdout.log</string>
 	<key>StandardErrorPath</key>
-	<string>/Users/filip/.local/share/kokoro-tts/launchd-stderr.log</string>
+	<string>/Users/filip/.local/share/kokoro-tts/menubar-stderr.log</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
 	</dict>
 	<key>ProcessType</key>
-	<string>Standard</string>
+	<string>Interactive</string>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 </dict>

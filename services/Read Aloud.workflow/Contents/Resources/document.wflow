@@ -59,7 +59,7 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>/Users/filip/.local/share/kokoro-tts/venv/bin/python3 /Users/filip/.local/share/kokoro-tts/client.py</string>
+					<string>/Users/filip/.local/share/kokoro-tts/service-wrapper.sh</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>
