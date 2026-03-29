@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Kokoro TTS menu bar app — shows status, controls playback."""
+"""Kokoro TTS menu bar app — status, controls, global hotkeys."""
 
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -9,15 +10,33 @@ import threading
 
 import rumps
 
+# Global hotkey support via pyobjc (bundled with rumps)
+from AppKit import NSEvent, NSKeyDownMask
+from Cocoa import NSControlKeyMask, NSCommandKeyMask
+
 SOCKET_PATH = "/tmp/kokoro-tts.sock"
 PLIST_LABEL = "com.filip.kokoro-tts"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+LOG_PATH = os.path.join(BASE_DIR, "menubar.log")
 
-# Menu bar icons (SF Symbols aren't available in rumps, use unicode)
 ICON_IDLE = "🔇"
 ICON_SPEAKING = "🔊"
 ICON_OFFLINE = "⚠️"
+
+log = logging.getLogger("kokoro-menubar")
+
+
+def setup_logging():
+    handler = logging.handlers.RotatingFileHandler(
+        LOG_PATH, maxBytes=500_000, backupCount=1
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+import logging.handlers  # noqa: E402
 
 
 def send_command(cmd_dict, timeout=2.0):
@@ -55,9 +74,9 @@ class KokoroMenuBar(rumps.App):
         self.cfg = load_config()
 
         self.status_item = rumps.MenuItem("Status: checking...")
-        self.stop_item = rumps.MenuItem("Stop Reading", callback=self.on_stop)
+        self.stop_item = rumps.MenuItem("Stop Reading  (⌃⌘X)", callback=self.on_stop)
         self.read_clipboard_item = rumps.MenuItem(
-            "Read Clipboard", callback=self.on_read_clipboard
+            "Read Clipboard  (⌃⌘R)", callback=self.on_read_clipboard
         )
 
         # Voice submenu
@@ -99,7 +118,7 @@ class KokoroMenuBar(rumps.App):
 
         self.menu = [
             self.status_item,
-            None,  # separator
+            None,
             self.stop_item,
             self.read_clipboard_item,
             None,
@@ -109,9 +128,73 @@ class KokoroMenuBar(rumps.App):
             self.restart_item,
         ]
 
+        # Register global hotkeys
+        self._register_hotkeys()
+
         # Poll status every 2 seconds
         self._poll_timer = rumps.Timer(self.poll_status, 2)
         self._poll_timer.start()
+
+        log.info("Menu bar app started")
+
+    def _register_hotkeys(self):
+        """Register global keyboard shortcuts via NSEvent monitor."""
+        mask = NSKeyDownMask
+
+        def handler(event):
+            flags = event.modifierFlags()
+            has_ctrl = flags & NSControlKeyMask
+            has_cmd = flags & NSCommandKeyMask
+            keycode = event.keyCode()
+
+            if has_ctrl and has_cmd:
+                # Ctrl+Cmd+X (keycode 7) → Stop
+                if keycode == 7:
+                    log.info("Global hotkey: Ctrl+Cmd+X → Stop")
+                    threading.Thread(target=self._do_stop, daemon=True).start()
+                # Ctrl+Cmd+S (keycode 1) → Read Selection (copy + speak)
+                elif keycode == 1:
+                    log.info("Global hotkey: Ctrl+Cmd+S → Read Selection")
+                    threading.Thread(target=self._do_read_selection, daemon=True).start()
+                # Ctrl+Cmd+R (keycode 15) → Read Clipboard
+                elif keycode == 15:
+                    log.info("Global hotkey: Ctrl+Cmd+R → Read Clipboard")
+                    threading.Thread(target=self._do_read_clipboard, daemon=True).start()
+
+        NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(mask, handler)
+        log.info("Global hotkeys registered: Ctrl+Cmd+S (read selection), Ctrl+Cmd+X (stop), Ctrl+Cmd+R (read clipboard)")
+
+    def _do_stop(self):
+        send_command({"cmd": "stop"})
+
+    def _do_read_selection(self):
+        """Copy current selection (simulate Cmd+C), then speak it."""
+        import time as _time
+        # Save current clipboard
+        old = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+        # Simulate Cmd+C
+        subprocess.run([
+            "osascript", "-e",
+            'tell application "System Events" to keystroke "c" using command down'
+        ], capture_output=True)
+        _time.sleep(0.15)  # wait for clipboard to update
+        result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+        text = result.stdout.strip()
+        # Restore clipboard if we got text
+        if text and text != old.strip():
+            send_command({"cmd": "speak", "text": text})
+        elif old.strip():
+            # No new selection — fall back to whatever was on clipboard
+            send_command({"cmd": "speak", "text": old.strip()})
+
+    def _do_read_clipboard(self):
+        try:
+            result = subprocess.run(["pbpaste"], capture_output=True, text=True)
+            text = result.stdout.strip()
+            if text:
+                send_command({"cmd": "speak", "text": text})
+        except Exception as e:
+            log.error("Read clipboard error: %s", e)
 
     def poll_status(self, _=None):
         resp = send_command({"cmd": "status"})
@@ -128,7 +211,7 @@ class KokoroMenuBar(rumps.App):
             self.stop_item.set_callback(None)
 
     def on_stop(self, _):
-        send_command({"cmd": "stop"})
+        threading.Thread(target=self._do_stop, daemon=True).start()
         self.poll_status()
 
     def on_read_clipboard(self, _):
@@ -155,7 +238,6 @@ class KokoroMenuBar(rumps.App):
             save_config(self.cfg)
             for vid, item in self.voice_items.items():
                 item.state = 1 if vid == voice_id else 0
-            # Restart daemon to pick up new voice
             self.on_restart(None)
         return callback
 
@@ -178,4 +260,9 @@ class KokoroMenuBar(rumps.App):
 
 
 if __name__ == "__main__":
-    KokoroMenuBar().run()
+    setup_logging()
+    try:
+        KokoroMenuBar().run()
+    except Exception as e:
+        log.error("Menu bar app crashed: %s", e, exc_info=True)
+        raise

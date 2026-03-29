@@ -10,6 +10,7 @@ import os
 import queue
 import signal
 import sys
+import threading
 import time
 
 import sounddevice as sd
@@ -132,6 +133,7 @@ class KokoroDaemon:
         self.config = load_config()
         self.player = StreamingPlayer()
         self._speak_task = None
+        self._cancel_requested = threading.Event()
 
         model_path = os.path.join(BASE_DIR, "models", self.config["model"])
         voices_path = os.path.join(BASE_DIR, "models", "voices-v1.0.bin")
@@ -155,6 +157,7 @@ class KokoroDaemon:
                 pass
 
         self._speak_task = asyncio.current_task()
+        self._cancel_requested.clear()
         voice = self.config["voice"]
         speed = self.config["speed"]
         lang = self.config["lang"]
@@ -174,6 +177,11 @@ class KokoroDaemon:
             async for samples, sr in self.kokoro.create_stream(
                 text, voice=voice, speed=speed, lang=lang
             ):
+                # Double-guard: check flag + asyncio cancel
+                if self._cancel_requested.is_set():
+                    log.info("Synthesis stopped by cancel flag after %d chunks", chunk_count)
+                    self.player.stop()
+                    return
                 chunk_count += 1
                 self.player.feed_chunk(samples)
                 if chunk_count == 1:
@@ -187,14 +195,19 @@ class KokoroDaemon:
             self.player.stop()
             return
 
+        if self._cancel_requested.is_set():
+            self.player.stop()
+            return
+
         self.player.finish()
         log.info("Synthesized %d chunks in %.2fs", chunk_count, time.time() - t0)
 
     def handle_stop(self):
+        self._cancel_requested.set()
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
         self.player.stop()
-        log.info("Playback stopped")
+        log.info("Playback stopped, CPU released")
 
     async def handle_client(self, reader, writer):
         try:
