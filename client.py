@@ -38,12 +38,12 @@ def try_start_daemon():
         pass
 
 
-def fallback_say(text):
-    """Fall back to macOS say command if daemon is unavailable."""
-    try:
-        subprocess.Popen(["say", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+def notify_error(msg):
+    """Show a macOS notification when daemon is unavailable."""
+    subprocess.Popen(
+        ["osascript", "-e", f'display notification "{msg}" with title "Kokoro TTS"'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
 
 
 def main():
@@ -88,13 +88,8 @@ def main():
             print(json.dumps(resp, indent=2))
         sys.exit(0)
     except (FileNotFoundError, ConnectionRefusedError):
-        # Last resort: fall back to macOS say
-        if text:
-            fallback_say(text)
-            sys.exit(0)
-        else:
-            print("Error: daemon not running and could not start it", file=sys.stderr)
-            sys.exit(1)
+        notify_error("Daemon not running. Restart via menu bar or launchctl.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

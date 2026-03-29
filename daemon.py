@@ -10,7 +10,6 @@ import os
 import queue
 import signal
 import sys
-import threading
 import time
 
 import sounddevice as sd
@@ -21,6 +20,7 @@ SOCKET_PATH = "/tmp/kokoro-tts.sock"
 LOG_PATH = os.path.join(BASE_DIR, "kokoro-tts.log")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 SAMPLE_RATE = 24000
+BLOCK_SIZE = 2048
 
 log = logging.getLogger("kokoro-tts")
 
@@ -44,44 +44,73 @@ def load_config():
         return {"voice": "af_heart", "speed": 1.0, "model": "kokoro-v1.0.onnx", "lang": "en-us"}
 
 
-class TTSPlayer:
-    """Manages audio playback with interruption support."""
+class StreamingPlayer:
+    """Plays audio chunks as they arrive, with interruption support."""
 
     def __init__(self):
-        self._audio_queue = queue.Queue()
+        self._queue = queue.Queue()
         self._stream = None
-        self._playing = False
-        self._cancel = threading.Event()
-        self._done = threading.Event()
-        self._done.set()
+        self._finished = False  # True when all chunks have been queued
+        self._cancel = False
 
     def _callback(self, outdata, frames, time_info, status):
         try:
-            data = self._audio_queue.get_nowait()
+            data = self._queue.get_nowait()
         except queue.Empty:
-            if self._cancel.is_set() or self._audio_queue.empty():
-                outdata.fill(0)
-                if not self._playing:
-                    raise sd.CallbackAbort
-                return
             outdata.fill(0)
-            return
+            if self._finished or self._cancel:
+                raise sd.CallbackAbort
+            return  # Synthesis still producing — output silence, keep going
 
         if len(data) < frames:
             outdata[:len(data), 0] = data
             outdata[len(data):, 0] = 0
         elif len(data) > frames:
             outdata[:, 0] = data[:frames]
-            self._audio_queue.put(data[frames:])
+            self._queue.put(data[frames:])
         else:
             outdata[:, 0] = data
 
+    def start(self):
+        """Start the audio output stream. Call feed_chunk() to push audio."""
+        self._queue = queue.Queue()
+        self._finished = False
+        self._cancel = False
+        try:
+            self._stream = sd.OutputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                callback=self._callback,
+                blocksize=BLOCK_SIZE,
+            )
+            self._stream.start()
+        except Exception as e:
+            log.error("Audio stream start error: %s", e)
+            self._stream = None
+
+    def feed_chunk(self, samples):
+        """Feed a synthesized audio chunk into the playback queue."""
+        if self._cancel:
+            return
+        data = samples.astype(np.float32)
+        for i in range(0, len(data), BLOCK_SIZE):
+            if self._cancel:
+                return
+            self._queue.put(data[i:i + BLOCK_SIZE])
+
+    def finish(self):
+        """Signal that no more chunks will arrive."""
+        self._finished = True
+
     def stop(self):
-        self._cancel.set()
-        self._playing = False
-        while not self._audio_queue.empty():
+        """Stop playback immediately."""
+        self._cancel = True
+        self._finished = True
+        # Drain queue
+        while not self._queue.empty():
             try:
-                self._audio_queue.get_nowait()
+                self._queue.get_nowait()
             except queue.Empty:
                 break
         if self._stream is not None:
@@ -91,59 +120,17 @@ class TTSPlayer:
             except Exception:
                 pass
             self._stream = None
-        self._done.set()
-
-    def play_chunks(self, chunks):
-        """Play a list of audio chunks (numpy arrays) with gapless output."""
-        self.stop()
-        self._cancel.clear()
-        self._done.clear()
-        self._playing = True
-
-        # Break audio into small blocks for the callback
-        block_size = 2048
-        for chunk in chunks:
-            if self._cancel.is_set():
-                break
-            for i in range(0, len(chunk), block_size):
-                if self._cancel.is_set():
-                    break
-                self._audio_queue.put(chunk[i:i + block_size].astype(np.float32))
-
-        if self._cancel.is_set():
-            self._playing = False
-            self._done.set()
-            return
-
-        try:
-            self._stream = sd.OutputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="float32",
-                callback=self._callback,
-                blocksize=block_size,
-                finished_callback=lambda: self._done.set(),
-            )
-            self._stream.start()
-        except Exception as e:
-            log.error("Audio stream error: %s", e)
-            self._playing = False
-            self._done.set()
-
-    def wait(self):
-        self._done.wait()
-        self._playing = False
 
     @property
     def is_playing(self):
-        return self._playing and not self._done.is_set()
+        return self._stream is not None and self._stream.active
 
 
 class KokoroDaemon:
     def __init__(self):
         setup_logging()
         self.config = load_config()
-        self.player = TTSPlayer()
+        self.player = StreamingPlayer()
         self._speak_task = None
 
         model_path = os.path.join(BASE_DIR, "models", self.config["model"])
@@ -157,7 +144,8 @@ class KokoroDaemon:
                  self.config["voice"], self.config["speed"], self.config["lang"])
 
     async def handle_speak(self, text):
-        """Synthesize and play text. Interrupts any current playback."""
+        """Synthesize and play text. Streams audio — plays as chunks arrive."""
+        # Cancel previous speak task
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
             self.player.stop()
@@ -171,28 +159,36 @@ class KokoroDaemon:
         speed = self.config["speed"]
         lang = self.config["lang"]
 
+        # Clean text for TTS
+        from preprocess import preprocess_for_tts
+        text = preprocess_for_tts(text)
+
         log.info("Speaking %d chars, voice=%s", len(text), voice)
         t0 = time.time()
 
-        chunks = []
+        # Start audio output immediately — chunks will feed in as synthesized
+        self.player.start()
+        chunk_count = 0
+
         try:
             async for samples, sr in self.kokoro.create_stream(
                 text, voice=voice, speed=speed, lang=lang
             ):
-                chunks.append(samples)
+                chunk_count += 1
+                self.player.feed_chunk(samples)
+                if chunk_count == 1:
+                    log.info("First chunk ready in %.2fs", time.time() - t0)
         except asyncio.CancelledError:
-            log.info("Synthesis cancelled")
+            log.info("Synthesis cancelled after %d chunks", chunk_count)
+            self.player.stop()
             return
         except Exception as e:
             log.error("Synthesis error: %s", e)
+            self.player.stop()
             return
 
-        if not chunks:
-            log.warning("No audio generated")
-            return
-
-        log.info("Synthesized in %.2fs, %d chunks", time.time() - t0, len(chunks))
-        self.player.play_chunks(chunks)
+        self.player.finish()
+        log.info("Synthesized %d chunks in %.2fs", chunk_count, time.time() - t0)
 
     def handle_stop(self):
         if self._speak_task and not self._speak_task.done():
@@ -202,7 +198,7 @@ class KokoroDaemon:
 
     async def handle_client(self, reader, writer):
         try:
-            data = await asyncio.wait_for(reader.read(1_000_000), timeout=5.0)
+            data = await asyncio.wait_for(reader.read(-1), timeout=5.0)
             if not data:
                 writer.close()
                 return
