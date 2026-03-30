@@ -84,6 +84,9 @@ class StreamingPlayer:
         self._cancel = False
         self._paused = False
         try:
+            # Re-query default device so hot-plugged headphones are picked up
+            sd._terminate()
+            sd._initialize()
             self._stream = sd.OutputStream(
                 samplerate=SAMPLE_RATE,
                 channels=1,
